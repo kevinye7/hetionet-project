@@ -68,10 +68,10 @@ If your actual `edges.tsv` uses slightly different metaedge codes, you can adjus
   - `id` (e.g. `Disease::DOID:263`)
   - `name`
 - **Relationship type**
-  - Unified type: `:HETIO { metaedge: <code> }`
-  - Example: `(c:Compound)-[:HETIO {metaedge: 'CtD'}]->(d:Disease)`
+  - Each edge uses its `metaedge` code as the relationship type (e.g. `:CtD`, `:DuG`, `:DlA`)
+  - Example: `(c:Compound)-[:CtD]->(d:Disease)`
 
-This schema keeps the physical model simple while still allowing query engines to filter by `metaedge`. Indexes/constraints are created on `id` for each major label to guarantee fast lookup:
+Indexes/constraints are created on `id` for each major label to guarantee fast lookup:
 
 - `Disease(id)`
 - `Compound(id)`
@@ -83,37 +83,27 @@ This schema keeps the physical model simple while still allowing query engines t
 **Assumption (project logic)**  
 We assume a compound can treat a disease if:
 
-- The disease **up‑regulates** or **down‑regulates** a gene.
-- The disease **localizes** to an anatomy where that gene is active
-  (connected by `AuG`, `AdG`, or `AeG`).
+- The disease **localizes** to an anatomy where a gene is **up‑regulated** or **down‑regulated**
+  (connected by `AuG` or `AdG`).
 - The compound regulates the **same gene** in the **opposite direction**
-  (disease up → compound down, disease down → compound up).
+  (anatomy up → compound down, anatomy down → compound up).
 - The compound does **not already** have a `CtD` or `CpD` edge to that disease.
 
 Cypher:
 
 ```cypher
-MATCH (d:Disease {id: $disease_id})-[:HETIO {metaedge: 'DlA'}]->(a:Anatomy)
+MATCH (d:Disease {id: $disease_id})-[:DlA]->(a:Anatomy)
 
-MATCH (d)-[dg:HETIO]->(g:Gene)
-WHERE dg.metaedge IN ['DuG', 'DdG']
+MATCH (a)-[ag:AuG|AdG]->(g:Gene)
 
-MATCH (a)-[ag:HETIO]->(g)
-WHERE ag.metaedge IN ['AuG', 'AdG', 'AeG']
+MATCH (c:Compound)-[cg:CuG|CdG]->(g)
 
-MATCH (c:Compound)-[cg:HETIO]->(g)
-WHERE cg.metaedge IN ['CuG', 'CdG']
+WITH d, c,
+  CASE WHEN type(ag) = 'AuG' THEN 1 ELSE -1 END AS anatomy_sign,
+  CASE WHEN type(cg) = 'CuG' THEN 1 ELSE -1 END AS compound_sign
 
-WITH
-  d, c,
-  CASE WHEN dg.metaedge = 'DuG' THEN 1 ELSE -1 END AS disease_sign,
-  CASE WHEN cg.metaedge = 'CuG' THEN 1 ELSE -1 END AS compound_sign
-
-WHERE disease_sign = -compound_sign
-
-OPTIONAL MATCH (c)-[cd:HETIO]->(d)
-WITH d, c, collect(cd.metaedge) AS existing_edges
-WHERE NONE(x IN existing_edges WHERE x IN ['CtD', 'CpD'])
+WHERE anatomy_sign = -compound_sign
+  AND NOT (c)-[:CtD|CpD]->(d)
 
 RETURN DISTINCT
   c.id   AS compound_id,

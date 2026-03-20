@@ -84,56 +84,45 @@ class Neo4jBackend:
             # Edges
             with open(edges_path, newline="", encoding="utf-8") as f_edges:
                 reader = csv.DictReader(f_edges, delimiter="\t")
-                batch: List[Dict] = []
-                for row in reader:
-                    batch.append({
-                        "source": row["source"],
-                        "target": row["target"],
-                        "metaedge": row["metaedge"],
-                    })
-                    if len(batch) >= BATCH_EDGES:
-                        session.run(
-                            """
-                            UNWIND $batch AS row
-                            MATCH (s {id: row.source}), (t {id: row.target})
-                            MERGE (s)-[:HETIO {metaedge: row.metaedge}]->(t)
-                            """,
-                            batch=batch,
-                        )
-                        batch = []
-                if batch:
+                batches_by_type: Dict[str, List[Dict]] = {}
+
+                def flush(rel_type: str, batch: List[Dict]) -> None:
+                    if not batch:
+                        return
                     session.run(
-                        """
+                        f"""
                         UNWIND $batch AS row
-                        MATCH (s {id: row.source}), (t {id: row.target})
-                        MERGE (s)-[:HETIO {metaedge: row.metaedge}]->(t)
+                        MATCH (s {{id: row.source}}), (t {{id: row.target}})
+                        MERGE (s)-[:{rel_type}]->(t)
                         """,
                         batch=batch,
                     )
 
+                for row in reader:
+                    rel_type = row["metaedge"]
+                    batch = batches_by_type.setdefault(rel_type, [])
+                    batch.append({"source": row["source"], "target": row["target"]})
+                    if len(batch) >= BATCH_EDGES:
+                        flush(rel_type, batch)
+                        batches_by_type[rel_type] = []
+
+                for rel_type, batch in batches_by_type.items():
+                    flush(rel_type, batch)
+
     def query2(self, disease_id: str) -> None:
         cypher = """
-        MATCH (d:Disease {id: $disease_id})-[:HETIO {metaedge: 'DlA'}]->(a:Anatomy)
+        MATCH (d:Disease {id: $disease_id})-[:DlA]->(a:Anatomy)
 
-        MATCH (d)-[dg:HETIO]->(g:Gene)
-        WHERE dg.metaedge IN ['DuG', 'DdG']
+        MATCH (a)-[ag:AuG|AdG]->(g:Gene)
 
-        MATCH (a)-[ag:HETIO]->(g)
-        WHERE ag.metaedge IN ['AuG', 'AdG', 'AeG']
+        MATCH (c:Compound)-[cg:CuG|CdG]->(g)
 
-        MATCH (c:Compound)-[cg:HETIO]->(g)
-        WHERE cg.metaedge IN ['CuG', 'CdG']
+        WITH d, c,
+          CASE WHEN type(ag) = 'AuG' THEN 1 ELSE -1 END AS anatomy_sign,
+          CASE WHEN type(cg) = 'CuG' THEN 1 ELSE -1 END AS compound_sign
 
-        WITH
-          d, c,
-          CASE WHEN dg.metaedge = 'DuG' THEN 1 ELSE -1 END AS disease_sign,
-          CASE WHEN cg.metaedge = 'CuG' THEN 1 ELSE -1 END AS compound_sign
-
-        WHERE disease_sign = -compound_sign
-
-        OPTIONAL MATCH (c)-[cd:HETIO]->(d)
-        WITH d, c, collect(cd.metaedge) AS existing_edges
-        WHERE NONE(x IN existing_edges WHERE x IN ['CtD', 'CpD'])
+        WHERE anatomy_sign = -compound_sign
+          AND NOT (c)-[:CtD|CpD]->(d)
 
         RETURN DISTINCT
           c.id   AS compound_id,
