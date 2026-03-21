@@ -1,127 +1,74 @@
-# HetioNet Project I – Multi‑Store NoSQL Implementation
+# HetioNet Project I
 
-This project implements the HetioNet user case using two NoSQL technologies:
+HetioNet is modeled with **two NoSQL stores**: Neo4j (graph) and MongoDB (documents). The CLI loads `nodes.tsv` and `edges.tsv`, then answers the two required queries. The GUI calls the same backends (Query 1 → MongoDB, Query 2 → Neo4j).
 
-- **Neo4j** as a **graph store**
-- **MongoDB** as a **document store**
-
-The implementation is driven by a single Python command‑line tool, `hetionet_cli.py`, which can:
-
-- Create and populate the databases from `nodes.tsv` and `edges.tsv`
-- Answer the two assignment queries with an emphasis on fast response time
+**Files:** `hetionet_cli.py`, `hetionet_gui.py`, `requirements.txt`, `nodes.tsv`, `edges.tsv`.
 
 ---
 
-## Data model
+## Design overview
 
-### Input files
+- **Neo4j:** Full graph — all node kinds and all edges. Relationship **types** match HetioNet `metaedge` codes (e.g. `:CtD`, `:DlA`, `:CuG`). Used for **Query 2** (multi-hop graph pattern).
+- **MongoDB:** Denormalized **one document per disease** with nested lists for drugs, genes, and anatomies. Used for **Query 1** (single `findOne` by disease id — fast).
 
-- `nodes.tsv`
-  - Columns: `id`, `name`, `kind`
-  - Example rows:
-    - `Gene::9997\tSC02\tGene`
-    - `Compound::DB09028\tCytisine\tCompound`
-- `edges.tsv`
-  - Columns: `source`, `metaedge`, `target`
-  - Example rows:
-    - `Gene::801\tGiG\tGene::7428`
-    - `Disease::DOID:263\tDuG\tGene::857`
-
-The `kind` field in `nodes.tsv` maps directly to node labels in Neo4j and high‑level types in MongoDB:
-
-- `Disease`
-- `Compound`
-- `Gene`
-- `Anatomy`
-
-The `metaedge` field encodes the semantic type of a relationship. For this project we focus on:
-
-- **Compound → Disease**
-  - `CtD`: compound **treats** disease
-  - `CpD`: compound **palliates** disease
-- **Disease → Anatomy**
-  - `DlA`: disease **localizes** to anatomy
-- **Disease → Gene**
-  - `DuG`: disease **up‑regulates** gene
-  - `DdG`: disease **down‑regulates** gene
-  - `DaG`: disease **associates** gene
-- **Compound → Gene**
-  - `CuG`: compound **up‑regulates** gene
-  - `CdG`: compound **down‑regulates** gene
-  - `CbG`: compound **binds** gene
-- **Anatomy → Gene**
-  - `AuG`: anatomy **up‑regulates** gene
-  - `AdG`: anatomy **down‑regulates** gene
-  - `AeG`: anatomy **expresses** gene
-
-If your actual `edges.tsv` uses slightly different metaedge codes, you can adjust the constant sets at the top of `hetionet_cli.py`.
+Rough flow: TSV files → `load-neo4j` / `build-mongo` → databases → `q1-mongo` / `q2-neo4j` or GUI.
 
 ---
 
-## Database designs
+## Input data
 
-### 1. Graph store – Neo4j
+- **`nodes.tsv`** — columns: `id`, `name`, `kind`
+  - Example: `Gene::9997`, `SC02`, `Gene`
+- **`edges.tsv`** — columns: `source`, `metaedge`, `target`
+  - Example: `Disease::DOID:263`, `DuG`, `Gene::857`
 
-- **Node labels**
-  - `Disease`, `Compound`, `Gene`, `Anatomy`
-- **Node properties**
-  - `id` (e.g. `Disease::DOID:263`)
-  - `name`
-- **Relationship type**
-  - Each edge uses its `metaedge` code as the relationship type (e.g. `:CtD`, `:DuG`, `:DlA`)
-  - Example: `(c:Compound)-[:CtD]->(d:Disease)`
+**Node kinds** used as Neo4j labels / Mongo types: `Disease`, `Compound`, `Gene`, `Anatomy`.
 
-Indexes/constraints are created on `id` for each major label to guarantee fast lookup:
+**Relationship codes** (subset; full graph loads every `metaedge` in the TSV):
 
-- `Disease(id)`
-- `Compound(id)`
-- `Gene(id)`
-- `Anatomy(id)`
+- **Compound → Disease:** `CtD` (treats), `CpD` (palliates)
+- **Disease → Anatomy:** `DlA` (localizes)
+- **Disease → Gene:** `DuG`, `DdG`, `DaG` (up / down / associate) — used in Mongo Query 1
+- **Compound → Gene:** `CuG`, `CdG` (up / down) — used in Neo4j Query 2
+- **Anatomy → Gene:** `AuG`, `AdG` (up / down) — used in Neo4j Query 2
 
-#### Query 2 (Neo4j)
+---
 
-**Assumption (project logic)**  
-We assume a compound can treat a disease if:
+## Neo4j (graph store)
 
-- The disease **localizes** to an anatomy where a gene is **up‑regulated** or **down‑regulated**
-  (connected by `AuG` or `AdG`).
-- The compound regulates the **same gene** in the **opposite direction**
-  (anatomy up → compound down, anatomy down → compound up).
-- The compound does **not already** have a `CtD` or `CpD` edge to that disease.
+- **Nodes:** label = `kind`; properties `id`, `name`
+- **Relationships:** type = `metaedge` string from TSV (not a single generic type)
+- **Constraints:** unique `id` on `Disease`, `Compound`, `Gene`, `Anatomy`
 
-Cypher:
+**Load:** `python hetionet_cli.py load-neo4j --nodes nodes.tsv --edges edges.tsv`  
+Creates constraints, merges nodes in batches, merges edges in batches (grouped by relationship type).
+
+**Query 2** — Given a disease id, find compounds that could treat it as *new* drugs: disease localizes to anatomy; anatomy up/down-regulates a gene; compound regulates that gene in the **opposite** direction; exclude compounds that already have `CtD` or `CpD` to that disease. One Cypher query:
 
 ```cypher
 MATCH (d:Disease {id: $disease_id})-[:DlA]->(a:Anatomy)
-
 MATCH (a)-[ag:AuG|AdG]->(g:Gene)
-
 MATCH (c:Compound)-[cg:CuG|CdG]->(g)
-
 WITH d, c,
   CASE WHEN type(ag) = 'AuG' THEN 1 ELSE -1 END AS anatomy_sign,
   CASE WHEN type(cg) = 'CuG' THEN 1 ELSE -1 END AS compound_sign
-
 WHERE anatomy_sign = -compound_sign
   AND NOT (c)-[:CtD|CpD]->(d)
-
-RETURN DISTINCT
-  c.id   AS compound_id,
-  c.name AS compound_name
+RETURN DISTINCT c.id AS compound_id, c.name AS compound_name
 ORDER BY compound_name;
 ```
 
-This query exactly matches the textual requirement: it identifies **new** compounds that could treat the disease based on opposite regulation at the disease‑specific anatomical locations, and filters out compounds that already treat or palliate it.
+If you previously loaded with a different edge model, delete Neo4j’s `data` folder and run `load-neo4j` again.
 
 ---
 
-### 2. Document store – MongoDB
+## MongoDB (document store)
 
-MongoDB is used to speed up Query 1 by pre‑aggregating all required information into a single document per disease. This demonstrates a second NoSQL type (document store) and shows how denormalization can improve query performance.
+- **Database:** `hetionet` (override with `MONGODB_DB` in `.env`)
+- **Collection:** `diseases`
+- **Build:** `python hetionet_cli.py build-mongo --nodes nodes.tsv --edges edges.tsv`
 
-- **Database**: `hetionet`
-- **Collection**: `diseases`
-- **Document structure**:
+**Document shape** (one per disease):
 
 ```json
 {
@@ -134,99 +81,54 @@ MongoDB is used to speed up Query 1 by pre‑aggregating all required informatio
     { "id": "Gene::857", "name": "SC02", "relation": "DuG" }
   ],
   "anatomies": [
-    { "id": "Anatomy::123", "name": "Brain" }
+    { "id": "Anatomy::UBERON:...", "name": "Brain" }
   ]
 }
 ```
 
-These documents are built directly from `nodes.tsv` and `edges.tsv` by `build-mongo` in `hetionet_cli.py`. An index is created on `name` for optional lookup by disease name.
-
-#### Query 1 (MongoDB)
-
-Query 1 can now be implemented as a single document lookup:
+**Query 1** — Given a disease id, return in one read: disease name, drugs that treat or palliate, associated genes, anatomies where the disease localizes:
 
 ```python
 db.diseases.find_one({"_id": "<disease_id>"})
 ```
 
-This returns, in one network round‑trip, the disease name, all drug names (treat/palliate), all gene names, and all anatomy locations, matching the assignment requirement.
-
 ---
 
-## Python command‑line interface
-
-The CLI is implemented in `hetionet_cli.py`. It expects `nodes.tsv` and `edges.tsv` to be accessible on disk.
-
-### Installation
-
-From the project directory:
+## Setup
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Ensure you have:
+Optional `.env`:
 
-- A running **Neo4j** instance (default `bolt://localhost:7687`)
-- A running **MongoDB** instance (default `mongodb://localhost:27017`)
+```
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your_password
 
-Optionally configure environment variables:
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB=hetionet
+```
 
-- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`
-- `MONGODB_URI`, `MONGODB_DB`
+Start **Neo4j** and **MongoDB** before loading or querying.
 
-### Load data into Neo4j (graph store)
+## Commands
 
 ```bash
 python hetionet_cli.py load-neo4j --nodes nodes.tsv --edges edges.tsv
-```
+python hetionet_cli.py q2-neo4j --disease-id Disease::DOID:10283
 
-This:
-
-- Creates uniqueness constraints on node `id`
-- Loads all nodes with appropriate labels
-- Loads all edges as `:HETIO` relationships with a `metaedge` property
-
-### Query 2 via Neo4j
-
-```bash
-python hetionet_cli.py q2-neo4j --disease-id Disease::DOID:263
-```
-
-Outputs a list of **candidate compounds** that could treat the disease under the up/down regulation assumption, excluding existing treating/palliating drugs.
-
-### Build MongoDB documents
-
-```bash
 python hetionet_cli.py build-mongo --nodes nodes.tsv --edges edges.tsv
+python hetionet_cli.py q1-mongo --disease-id Disease::DOID:10283
+
+python hetionet_gui.py
 ```
-
-This:
-
-- Reads `nodes.tsv` and `edges.tsv`
-- Builds one denormalized document per disease
-- Stores them in `hetionet.diseases`
-
-### Query 1 via MongoDB
-
-```bash
-python hetionet_cli.py q1-mongo --disease-id Disease::DOID:263
-```
-
-This executes Query 1 as a single document lookup in MongoDB for fast response.
 
 ---
 
-## Potential improvements (for the report)
+## Potential improvements
 
-- **Index tuning**
-  - Add Neo4j indexes on additional properties if needed (e.g. `name`).
-  - Add MongoDB compound indexes on frequently queried fields beyond `_id`.
-- **Caching**
-  - Cache results of expensive graph queries (especially Query 2) in a key‑value store such as Redis.
-- **Pre‑computation of candidate drugs**
-  - Periodically pre‑compute the candidate compound set for each disease and store the results in a separate MongoDB collection to make Query 2 constant‑time.
-- **Sharding / replication**
-  - For very large HetioNet instances, enable Neo4j clustering and MongoDB sharding to improve fault tolerance and horizontal scalability.
-
-These points can be used directly in the project document under "Potential improvements (e.g. how to speed up query)".
+- Index `name` (or other fields) in Neo4j / MongoDB if you add name-based search.
+- Cache Query 2 results (e.g. Redis) or precompute candidate compounds per disease in MongoDB.
+- For huge graphs: Neo4j clustering, MongoDB sharding/replication.
