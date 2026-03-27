@@ -142,12 +142,13 @@ class Neo4jBackend:
 
 
 # MongoDB (document store)
-
+# stores data as JSON-like "documents" grouped into "collections".
+# each disease becomes one document that contains its drugs, genes, and anatomies inline.
 @dataclass
 class Node:
-    id: str
-    name: str
-    kind: str
+    id: str    # e.g. "Disease::DOID:1234"
+    name: str  # human-readable name
+    kind: str  # e.g. "Disease", "Compound", "Gene", "Anatomy"
 
 
 class MongoBackend:
@@ -165,17 +166,22 @@ class MongoBackend:
         self.client.close()
 
     def build_from_tsv(self, nodes_path: str, edges_path: str) -> None:
+        # load every node from nodes.tsv into an in-memory dict
+        # Key = node id string, Value = Node dataclass instance.
         nodes: Dict[str, Node] = {}
         with open(nodes_path, newline="", encoding="utf-8") as f_nodes:
+            # reads the TSV header row and uses it as column names
             reader = csv.DictReader(f_nodes, delimiter="\t")
             for row in reader:
                 node_id = row["id"]
+                # store each node keyed by its id for quick lookup 
                 nodes[node_id] = Node(
                     id=node_id,
                     name=row.get("name", ""),
                     kind=row.get("kind", ""),
                 )
 
+        # build a skeleton MongoDB document for every Disease node that has drugs, genes, or anatomies to embed
         diseases: Dict[str, Dict] = {}
         for node in nodes.values():
             if node.kind == "Disease":
@@ -187,14 +193,18 @@ class MongoBackend:
                     "anatomies": [],
                 }
 
+        # walk every edge in edges.tsv and embed related data
+        # directly into the matching disease document (denormalization)
         with open(edges_path, newline="", encoding="utf-8") as f_edges:
             reader = csv.DictReader(f_edges, delimiter="\t")
             for row in reader:
-                source = row["source"]
-                target = row["target"]
-                metaedge = row["metaedge"]
+                source = row["source"]      # id of the node the edge starts from
+                target = row["target"]      # id of the node the edge points to
+                metaedge = row["metaedge"]  # edge type, e.g. "CtD", "DlA", "DuG"
 
                 # Compound -> Disease (treat/palliate)
+                # TREAT_EDGES = {"CtD", "CpD"} — compound treats or palliates disease
+                # source is the Compound, target is the Disease
                 if metaedge in TREAT_EDGES and target in diseases and source in nodes:
                     disease = diseases[target]
                     compound_node = nodes[source]
@@ -202,11 +212,12 @@ class MongoBackend:
                         {
                             "id": compound_node.id,
                             "name": compound_node.name,
-                            "relation": metaedge,
+                            "relation": metaedge,    # "CtD" = treats, "CpD" = palliates
                         }
                     )
 
-                # Disease -> Anatomy
+                # Disease -> Anatomy  ("DlA" = Disease localizes in Anatomy)
+                # source is the Disease, target is the Anatomy
                 elif metaedge == "DlA" and source in diseases and target in nodes:
                     disease = diseases[source]
                     anatomy_node = nodes[target]
@@ -217,7 +228,9 @@ class MongoBackend:
                         }
                     )
 
-                # Disease -> Gene
+                # Disease -> Gene  (up-regulates, down-regulates, or associates)
+                # DISEASE_GENE_EDGES = {"DuG", "DdG", "DaG"}
+                # source is the Disease, target is the Gene
                 elif metaedge in DISEASE_GENE_EDGES and source in diseases and target in nodes:
                     disease = diseases[source]
                     gene_node = nodes[target]
@@ -229,7 +242,9 @@ class MongoBackend:
                         }
                     )
 
-        # Deduplicate lists
+        # remove duplicate entries that may appear if the same
+        # edge was listed more than once in the TSV
+        # (id, relation) tuples for uniqueness of drugs and genes
         for doc in diseases.values():
             for field in ("drugs", "genes", "anatomies"):
                 seen = set()
@@ -242,7 +257,7 @@ class MongoBackend:
                 doc[field] = uniq_list
 
         coll = self.db["diseases"]
-        coll.drop()
+        coll.drop() # fresh load
         if diseases:
             coll.insert_many(list(diseases.values()))
         coll.create_index("name")
