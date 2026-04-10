@@ -152,11 +152,30 @@ class Node:
 
 
 class MongoBackend:
+    """
+    Stores data as JSON-like documents grouped into collections.
+    each disease is a single document that embeds its related drugs, genes, and
+    anatomy locations inline, so one query fetches everything about a disease
+    without needing joins.
+
+    Connection settings are read from environment variables (MONGODB_URI,
+    MONGODB_DB) and can be overridden by passing arguments directly.
+    """
+
     def __init__(
         self,
         uri: str = None,
         db_name: str = None,
     ) -> None:
+        """
+        Connect to MongoDB and select the target database.
+
+        Parameters:
+            uri:     MongoDB connection string. Defaults to the MONGODB_URI env
+                     var, or "mongodb://localhost:27017" if that is unset.
+            db_name: Name of the database to use. Defaults to the MONGODB_DB
+                     env var, or "hetionet" if that is unset.
+        """
         uri = uri or os.getenv("MONGODB_URI", "mongodb://localhost:27017")
         db_name = db_name or os.getenv("MONGODB_DB", "hetionet")
         self.client = MongoClient(uri)
@@ -166,6 +185,29 @@ class MongoBackend:
         self.client.close()
 
     def build_from_tsv(self, nodes_path: str, edges_path: str) -> None:
+        """
+        Parse the Hetionet TSV files and load denormalized disease documents
+        into the MongoDB "diseases" collection.
+
+        The process has three phases:
+          1. Read nodes.tsv: every node (Disease, Compound, Gene, Anatomy,
+             etc.) is loaded into an in-memory dict keyed by its id string.
+          2. Read edges.tsv: for each relevant edge type, the related node's
+             data is embedded directly into the matching disease document:
+               - CtD / CpD  (Compound treats/palliates Disease) -> drugs list
+               - DlA        (Disease localizes in Anatomy)      -> anatomies list
+               - DuG / DdG / DaG (Disease ↔ Gene)               -> genes list
+          3. Deduplicate: identical (id, relation) pairs are removed so that
+             rerunning on the same files doesn't create duplicate entries.
+
+        The existing "diseases" collection is dropped before each load so this
+        method is safe to call multiple times (idempotent)
+
+        Parameters:
+            nodes_path: Filesystem path to the nodes TSV file (nodes.tsv).
+            edges_path: Filesystem path to the edges TSV file (edges.tsv).
+        """
+
         # load every node from nodes.tsv into an in-memory dict
         # Key = node id string, Value = Node dataclass instance.
         nodes: Dict[str, Node] = {}
@@ -263,6 +305,19 @@ class MongoBackend:
         coll.create_index("name")
 
     def query1(self, disease_id: str) -> None:
+        """
+        Look up a disease by id and print its drugs, genes, and anatomy locations.
+
+        Because each disease document already embeds all related data inline
+        (see build_from_tsv), this is a single document lookup by primary key
+        (_id). no joins or additional queries are needed.
+
+        If the disease id is not found, a "not found" message is printed
+        and the method returns without error.
+
+        Parameters:
+            disease_id: The Hetionet disease id string, e.g. "Disease::DOID:1234".
+        """
         coll = self.db["diseases"]
         doc = coll.find_one({"_id": disease_id})
         if not doc:
