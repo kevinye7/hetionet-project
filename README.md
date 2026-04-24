@@ -132,7 +132,7 @@ python hetionet_gui.py
 
 ### Design Pattern
 
-All three queries use the **Aggregation / Counting** pattern as their core: each mapper tags individual edges with a key and a partial count, and each reducer sums those counts per key. Q2 chains two jobs because the question has two levels of grouping. Q3 uses the **Replicated Join** pattern -- the small `nodes.tsv` name table is loaded into memory and broadcast to all workers rather than shuffled through the network.
+All three queries use the **Aggregation / Counting** pattern as their core: each mapper tags individual edges with a key and the target node ID, and each reducer counts **distinct** targets per key to avoid inflating counts when the same drug-gene or drug-disease pair appears under multiple edge types. Q2 chains two jobs because the question has two levels of grouping. Q3 uses the **Replicated Join** pattern — the small `nodes.tsv` name table is loaded into memory and broadcast to all workers rather than shuffled through the network.
 
 ---
 
@@ -144,13 +144,16 @@ All three queries use the **Aggregation / Counting** pattern as their core: each
 MAPPER(edge: source, metaedge, target):
   if source starts with "Compound::":
     if metaedge in {CbG, CuG, CdG}:
-      emit(source, (1, 0))        // gene hit
+      emit(source, ("G", target))   // gene hit — carry target ID for dedup
     elif metaedge in {CtD, CpD}:
-      emit(source, (0, 1))        // disease hit
+      emit(source, ("D", target))   // disease hit — carry target ID for dedup
 
-REDUCER(compound_id, values: list of (g, d)):
-  gene_count    = sum of all g
-  disease_count = sum of all d
+DEDUP: drop duplicate (compound, tag, target) triples
+       (same drug can reach same gene via CbG and CuG — count it once)
+
+REDUCER(compound_id, values: list of (tag, target_id)):
+  gene_count    = count of distinct targets where tag == "G"
+  disease_count = count of distinct targets where tag == "D"
   emit(compound_id, gene_count, disease_count)
 
 POST: sort by gene_count descending, output top 5
@@ -199,11 +202,11 @@ REDUCER: pass-through (order already established by Q1)
 
 | Drug ID           | #Genes | #Diseases |
 | ----------------- | -----: | --------: |
-| Compound::DB08865 |    585 |         1 |
-| Compound::DB01254 |    564 |         1 |
-| Compound::DB00997 |    532 |        17 |
-| Compound::DB00570 |    523 |         7 |
-| Compound::DB00390 |    522 |         2 |
+| Compound::DB08865 |    580 |         1 |
+| Compound::DB01254 |    558 |         1 |
+| Compound::DB00997 |    528 |        17 |
+| Compound::DB00390 |    521 |         2 |
+| Compound::DB00170 |    521 |         0 |
 
 **Q2 — Diseases grouped by number of treating drugs (top 5 groups)**
 
@@ -219,11 +222,11 @@ REDUCER: pass-through (order already established by Q1)
 
 | Drug Name   | #Genes |
 | ----------- | -----: |
-| Crizotinib  |    585 |
-| Dasatinib   |    564 |
-| Doxorubicin |    532 |
-| Vinblastine |    523 |
-| Digoxin     |    522 |
+| Crizotinib  |    580 |
+| Dasatinib   |    558 |
+| Doxorubicin |    528 |
+| Digoxin     |    521 |
+| Menadione   |    521 |
 
 ---
 

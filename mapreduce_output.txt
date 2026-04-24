@@ -1,10 +1,10 @@
 === Q1: Top 5 drugs by gene count ===
 Drug ID                           Genes   Diseases
-Compound::DB08865                   585          1
-Compound::DB01254                   564          1
-Compound::DB00997                   532         17
-Compound::DB00570                   523          7
-Compound::DB00390                   522          2
+Compound::DB08865                   580          1
+Compound::DB01254                   558          1
+Compound::DB00997                   528         17
+Compound::DB00390                   521          2
+Compound::DB00170                   521          0
 
 === Q2: Diseases grouped by number of treating drugs (top 5) ===
    Drugs     Diseases
@@ -16,8 +16,8 @@ Compound::DB00390                   522          2
 
 === Q3: Top 5 drug names by gene count ===
 Drug Name                              Genes
-Crizotinib                               585
-Dasatinib                                564
-Doxorubicin                              532
-Vinblastine                              523
-Digoxin                                  522
+Crizotinib                               580
+Dasatinib                                558
+Doxorubicin                              528
+Digoxin                                  521
+Menadione                                521

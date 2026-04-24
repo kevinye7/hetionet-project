@@ -33,16 +33,25 @@ def main() -> None:
         .map(lambda parts: (parts[0], parts[1], parts[2]))
     )
 
-    # Mapper: keep only Compound edges, emit (compound_id, (gene_count, disease_count))
+    # Mapper: emit (compound_id, ("G", target_id)) or (compound_id, ("D", target_id))
+    # Using target_id instead of 1 so the reducer can deduplicate by distinct target
     q1_mapped = (
         edges
         .filter(lambda e: e[0].startswith("Compound::"))
         .filter(lambda e: e[1] in GENE_EDGES or e[1] in DISEASE_EDGES)
-        .map(lambda e: (e[0], (1, 0)) if e[1] in GENE_EDGES else (e[0], (0, 1)))
+        .map(lambda e: (e[0], ("G", e[2])) if e[1] in GENE_EDGES else (e[0], ("D", e[2])))
+        .distinct()   # drop duplicate (compound, tag, target) triples
     )
 
-    # Reducer: sum (gene_count, disease_count) per compound
-    q1_reduced = q1_mapped.reduceByKey(lambda a, b: (a[0] + b[0], a[1] + b[1]))
+    # Reducer: count distinct genes and diseases per compound
+    q1_reduced = (
+        q1_mapped
+        .groupByKey()
+        .mapValues(lambda vals: (
+            sum(1 for tag, _ in vals if tag == "G"),
+            sum(1 for tag, _ in vals if tag == "D"),
+        ))
+    )
 
     # Sort by gene count descending, take top 5
     q1_results = (
