@@ -10,9 +10,9 @@ Compound::DB00390                   522          2
    Drugs     Diseases
        1           10
        2            7
+       3            6
       11            6
        9            6
-       3            6
 
 === Q3: Top 5 drug names by gene count ===
 Drug Name                              Genes
