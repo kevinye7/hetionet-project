@@ -96,7 +96,7 @@ def main() -> None:
         .map(lambda row: (broadcast_names.value.get(row[0], row[0]), row[1]))
         .collect()
     )
-    
+
     print("=== Q1: Top 5 drugs by gene count ===")
     print(f"{'Drug ID':<30} {'Genes':>8} {'Diseases':>10}")
     print("-" * 52)
@@ -117,7 +117,6 @@ def main() -> None:
     for name, genes in q3_results:
         print(f"{name:<35} {genes:>8}")
 
-    # ── Save to file ───────────────────────────────────────────────────────────
     with open("mapreduce_output.txt", "w") as f:
         f.write("=== Q1: Top 5 drugs by gene count ===\n")
         f.write(f"{'Drug ID':<30} {'Genes':>8} {'Diseases':>10}\n")
